@@ -1,7 +1,9 @@
 param([ValidateSet('list','pull','push','check')][string]$Mode='list',[string]$SelectionFile)
 $ErrorActionPreference='Stop'
 $cfg=Get-Content (Join-Path $PSScriptRoot 'config.json') -Raw | ConvertFrom-Json
-$repo=Join-Path $env:LOCALAPPDATA 'MinecraftSync\repository'
+$hasher=[Security.Cryptography.SHA256]::Create()
+try {$repoId=([BitConverter]::ToString($hasher.ComputeHash([Text.Encoding]::UTF8.GetBytes($cfg.Remote.Trim())))).Replace('-','').ToLowerInvariant()} finally {$hasher.Dispose()}
+$repo=Join-Path $env:LOCALAPPDATA "MinecraftSync\repositories\$repoId"
 $saves=Join-Path $env:APPDATA '.minecraft\saves'
 $env:GIT_SSH_COMMAND='ssh -i "'+($cfg.Key -replace '\\','/')+'" -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes'
 $env:GIT_TERMINAL_PROMPT='0'
@@ -22,7 +24,8 @@ if(!(Test-Path (Join-Path $repo '.git'))){
 }
 $worlds=Join-Path $repo 'worlds'
 if($Mode -eq 'list') {
-  $names=@(Get-ChildItem $worlds -Directory | Select-Object -ExpandProperty Name)
+  $names=@()
+  if(Test-Path $worlds){$names=@(Get-ChildItem $worlds -Directory | Select-Object -ExpandProperty Name)}
   if(Test-Path $saves){$names+=@(Get-ChildItem $saves -Directory | Where-Object {Test-Path (Join-Path $_.FullName 'level.dat')} | Select-Object -ExpandProperty Name)}
   $names | Sort-Object -Unique
   exit
@@ -33,7 +36,11 @@ $selected=@($selected)
 if(!$selected.Count){throw 'Selectionne au moins un monde.'}
 foreach($name in $selected){if(!$name -or $name -in @('.','..') -or $name.IndexOfAny([IO.Path]::GetInvalidFileNameChars()) -ge 0){throw 'Nom de monde invalide.'}}
 if(GitRun status --porcelain){throw 'Le depot contient des changements non envoyes. Ouvre le dossier du depot pour les verifier avant de continuer.'}
-GitRun pull --ff-only
+& $cfg.Git -C $repo ls-remote --heads origin | Out-Null
+if($LASTEXITCODE -ne 0){throw 'Impossible de lire le depot distant.'}
+$heads=@(& $cfg.Git -C $repo ls-remote --heads origin)
+if($LASTEXITCODE -ne 0){throw 'Impossible de lire les branches distantes.'}
+if($heads.Count -gt 0){GitRun pull --ff-only}
 function Mirror($from,$to){
   New-Item -ItemType Directory -Force $to | Out-Null
   & robocopy $from $to /MIR /XF session.lock /NFL /NDL /NJH /NJS /NP | Out-Null
@@ -59,7 +66,8 @@ if($Mode -eq 'push'){
     & $cfg.Git -C $repo -c user.name=MinecraftSync -c user.email=minecraft-sync@local commit -m "Sauvegarde depuis $env:COMPUTERNAME ($stamp)"
     if($LASTEXITCODE -ne 0){throw 'Commit impossible.'}
   }elseif($LASTEXITCODE -ne 0){throw 'Verification Git impossible.'}
-  GitRun push origin HEAD:main
+  $branch=GitRun symbolic-ref --short HEAD
+  GitRun push --set-upstream origin "HEAD:refs/heads/$branch"
 }
 Write-Output 'Synchronisation terminee.'
 exit 0
